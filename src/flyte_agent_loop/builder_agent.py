@@ -40,6 +40,7 @@ from .agents import (
     parse_verdict,
     render_plan_files,
 )
+from .gates import GateResult, render_gate_feedback, run_quality_gate
 from .staging import ChangeStage, issue_builder_tools
 from .common import iso, run_id, run_name, utcnow
 from .config import Settings, load_settings
@@ -85,12 +86,16 @@ async def builder() -> RunRecord:
         flyte.report.log(
             f"<p>claimed issue {link(target.get('url', ''), f'#{number}')}: {target['title']}</p>"
         )
+        with GitHubClient(settings) as gh:
+            base_ref = gh.default_branch()
 
-        # 2 + 3. Build <-> verify loop. The builder gets up to settings.max_tries
-        # attempts to satisfy the verifier; each retry feeds back the verifier's
-        # feedback AND the prior staged solution so it can revise rather than restart.
+        # 2 + 3. Build <-> verify(<->gate) loop. The builder gets up to settings.max_tries
+        # attempts to satisfy the verifier AND the deterministic quality gate; each retry
+        # feeds back whichever rejected it (verifier notes, or real pytest/ruff output)
+        # plus the prior staged solution so it can revise rather than restart.
         plan = None
         verdict = None
+        gate_result: GateResult | None = None
         attempt = 0
         while attempt < settings.max_tries:
             attempt += 1
@@ -98,7 +103,7 @@ async def builder() -> RunRecord:
             message = (
                 _build_message(settings.repo, number, target)
                 if plan is None
-                else _retry_message(number, target, plan, verdict, attempt, settings.max_tries)
+                else _retry_message(number, target, plan, verdict, gate_result, attempt, settings.max_tries)
             )
             with flyte.group(f"build:attempt-{attempt}"):
                 builder = build_issue_agent(settings, context, extra_tools=issue_builder_tools(stage))
@@ -144,23 +149,52 @@ async def builder() -> RunRecord:
                 f"<p>attempt {attempt}/{settings.max_tries} verifier: "
                 f"{'PASS' if verdict.verified else 'FAIL'} — {verdict.notes}</p>"
             )
-            if verdict.verified:
-                break
-            log.info("builder: attempt %d/%d FAILED verification for issue #%s", attempt, settings.max_tries, number)
+            if not verdict.verified:
+                gate_result = None
+                log.info("builder: attempt %d/%d FAILED verification for issue #%s", attempt, settings.max_tries, number)
+                continue
 
-        if not verdict.verified:
-            # Exhausted every attempt without passing verification.
+            if plan.action == "decompose" or not plan.has_changes:
+                # Nothing for the deterministic gate to check (no staged files).
+                gate_result = None
+                break
+
+            with flyte.group(f"gate:attempt-{attempt}"):
+                gate_result = await run_quality_gate.aio(ref=base_ref, files=plan.files)
+            log.info(
+                "builder: attempt %d/%d gate passed=%s stage=%s: %s",
+                attempt, settings.max_tries, gate_result.passed, gate_result.stage, gate_result.summary,
+            )
+            flyte.report.log(
+                f"<p>attempt {attempt}/{settings.max_tries} quality gate: "
+                f"{'PASS' if gate_result.passed else 'FAIL'} ({gate_result.stage}) — {gate_result.summary}</p>"
+            )
+            if gate_result.passed:
+                break
+            log.info("builder: attempt %d/%d FAILED quality gate for issue #%s", attempt, settings.max_tries, number)
+
+        gate_ok = gate_result is None or gate_result.passed
+        if not (verdict.verified and gate_ok):
+            # Exhausted every attempt without passing verification and the quality gate.
             log.info("builder: exhausted %d attempt(s) for issue #%s; releasing", attempt, number)
+            if not verdict.verified:
+                combined_notes = verdict.notes
+            else:
+                combined_notes = (
+                    f"Verifier passed, but the automated test/lint gate failed at "
+                    f"'{gate_result.stage}': {gate_result.summary}"
+                )
             _comment_and_release(
                 settings, number, now,
-                f"\U0001f916 flyte-agent-loop tried {attempt} time(s) but the verifier still flags it: "
-                f"{verdict.notes}\n\nReleasing for a follow-up run.",
+                f"\U0001f916 flyte-agent-loop tried {attempt} time(s) but "
+                f"{'the verifier' if not verdict.verified else 'the automated quality gate'} still flags it: "
+                f"{combined_notes}\n\nReleasing for a follow-up run.",
             )
             return await _finish(
                 settings,
                 _record(
                     rid, now, "error", number=number, attempts=attempt, verified=False,
-                    verifier_notes=verdict.notes,
+                    verifier_notes=combined_notes,
                     summary=f"Verification failed after {attempt} attempt(s): {plan.summary}",
                 ),
             )
@@ -282,8 +316,11 @@ def _render_staged_issues(issues: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _retry_message(number: int, target: dict, prior_plan, verdict, attempt: int, max_tries: int) -> str:
-    """Retry instruction: feed back the verifier's feedback + the prior solution."""
+def _retry_message(
+    number: int, target: dict, prior_plan, verdict, gate_result, attempt: int, max_tries: int
+) -> str:
+    """Retry instruction: feed back whatever rejected the prior attempt (the LLM
+    verifier, or the deterministic quality gate) + the prior solution."""
     if prior_plan.action == "decompose":
         return (
             f"Your previous decomposition of spec issue #{number} ({target['title']}) was REJECTED by "
@@ -295,11 +332,17 @@ def _retry_message(number: int, target: dict, prior_plan, verdict, attempt: int,
             f"Prior summary: {prior_plan.summary}\n\n"
             f"Prior staged issues ({len(prior_plan.issues)}):\n{_render_staged_issues(prior_plan.issues)}"
         )
+    if verdict.verified and gate_result is not None and not gate_result.passed:
+        rejection_source = "the automated test/lint gate"
+        feedback = render_gate_feedback(gate_result)
+    else:
+        rejection_source = "the verifier"
+        feedback = f"Verifier feedback (address ALL of it):\n{verdict.notes}"
     return (
-        f"Your previous attempt to implement issue #{number} ({target['title']}) was REJECTED by the "
-        f"verifier. This is attempt {attempt} of {max_tries}.\n\n"
-        f"Verifier feedback (address ALL of it):\n{verdict.notes}\n\n"
-        f"Your previous solution is below. Revise it to fix the verifier's concerns, then re-stage "
+        f"Your previous attempt to implement issue #{number} ({target['title']}) was REJECTED by "
+        f"{rejection_source}. This is attempt {attempt} of {max_tries}.\n\n"
+        f"{feedback}\n\n"
+        f"Your previous solution is below. Revise it to fix the problems, then re-stage "
         f"EVERY file you want in the PR (staging replaces the previous staging) and submit again. "
         f"Keep the parts that were correct; change only what's needed.\n\n"
         f"Prior summary: {prior_plan.summary}\n\n"

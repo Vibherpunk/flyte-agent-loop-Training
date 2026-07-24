@@ -70,3 +70,25 @@ env = flyte.TaskEnvironment(
     secrets=SECRETS,
     env_vars=_passthrough_env_vars(),
 )
+
+# ---------------------------------------------------------------------------
+# Deterministic quality gate environment
+# ---------------------------------------------------------------------------
+# Separate image/env from the lightweight LLM-only `env` above: the gate needs
+# git + uv (to clone the target repo and install its real dependencies) and
+# more CPU/memory/disk, but makes no LLM calls, so it doesn't need the
+# Anthropic secret.
+gate_image = (
+    flyte.Image.from_debian_base()
+    .with_apt_packages("git")
+    .with_pip_packages("uv>=0.4")
+)
+
+gate_env = flyte.TaskEnvironment(
+    name="flyte_agent_loop_gate",
+    image=gate_image,
+    resources=flyte.Resources(cpu="2", memory="4Gi", disk="10Gi"),
+    secrets=[GITHUB_SECRET],
+    env_vars=_passthrough_env_vars(),
+)
+env.add_dependency(gate_env)

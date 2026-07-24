@@ -27,7 +27,7 @@ import logging
 
 import flyte
 
-from .environments import env
+from .environments import env, gate_env
 
 # Importing the pipeline modules registers their tasks (and triggers) on ``env``.
 from .distiller_agent import distiller
@@ -58,7 +58,7 @@ def main() -> None:
         print(f"Launched {args.run}: {run.url}")
         return
 
-    deployments = flyte.deploy(env, dryrun=args.dryrun)
+    deployments = flyte.deploy(env, gate_env, dryrun=args.dryrun)
 
     from flyte._initialize import get_client
 
