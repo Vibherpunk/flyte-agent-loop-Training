@@ -4,7 +4,13 @@ One :class:`flyte.Image` (flyte + litellm + httpx) backs every pipeline. Two
 secrets are injected as environment variables:
 
 * ``github-token``  -> ``GITHUB_TOKEN``       (repo read/write + PR/comment API)
-* ``anthropic-api-key`` -> ``ANTHROPIC_API_KEY`` (litellm provider key)
+* the model provider key, selected by ``FLYTE_AGENT_PROVIDER`` (default
+  ``anthropic``): ``anthropic-api-key`` -> ``ANTHROPIC_API_KEY``, or
+  ``openrouter-api-key`` -> ``OPENROUTER_API_KEY`` when set to ``openrouter``
+  (pair with a ``FLYTE_AGENT_MODEL`` like ``openrouter/anthropic/claude-sonnet-4.5``
+  — litellm's provider-prefixed convention). Trial addition: no standalone
+  Anthropic Console key was available, but a personal OpenRouter key already
+  was, so the provider became selectable instead of hardcoded.
 
 Non-secret configuration (target repo, model, agent id, dibs TTL, memory key)
 is captured from the deploying machine's environment into ``env_vars`` so a
@@ -38,8 +44,16 @@ image = (
 # Secrets
 # ---------------------------------------------------------------------------
 GITHUB_SECRET = flyte.Secret(key="github-token", as_env_var=config.ENV_GITHUB_TOKEN)
-ANTHROPIC_SECRET = flyte.Secret(key="anthropic-api-key", as_env_var="ANTHROPIC_API_KEY")
-SECRETS = [GITHUB_SECRET, ANTHROPIC_SECRET]
+# Provider key, resolved at DEPLOY time (read from the deploying machine's own
+# env, same as _passthrough_env_vars below) so a `flyte create secret` under
+# either name works without editing this file per run.
+_PROVIDER = os.environ.get("FLYTE_AGENT_PROVIDER", "anthropic").strip().lower()
+PROVIDER_SECRET = (
+    flyte.Secret(key="openrouter-api-key", as_env_var="OPENROUTER_API_KEY")
+    if _PROVIDER == "openrouter"
+    else flyte.Secret(key="anthropic-api-key", as_env_var="ANTHROPIC_API_KEY")
+)
+SECRETS = [GITHUB_SECRET, PROVIDER_SECRET]
 
 
 def _passthrough_env_vars() -> dict[str, str]:
