@@ -131,14 +131,36 @@ in containers with schedules and reports, just like a remote cluster, but with
 nothing to provision. It's the easiest way to exercise the scheduled pipelines
 end-to-end on your machine.
 
-**Prerequisites:** Docker running (and `kubectl` if you want to inspect the
-cluster). The `flyte` CLI ships with the `flyte` package installed above.
+**Prerequisites:** a Docker-API-compatible engine running (and `kubectl` if you
+want to inspect the cluster). The `flyte` CLI ships with the `flyte` package
+installed above.
 
-1. **Install Docker.** The devbox runs the Flyte cluster inside Docker, so you
-   need a working Docker Engine first:
+1. **Install a container engine.** The devbox runs the Flyte cluster inside
+   containers, so you need a working Docker-API engine first. On macOS,
+   [OrbStack](https://orbstack.dev/) is the recommended engine — it's a
+   lighter-weight Docker Desktop replacement (native macOS hypervisor, lower
+   idle RAM/CPU) and it's a drop-in: `flyte start devbox` just talks to
+   whatever engine `docker` is pointed at, no repo changes needed.
 
-   - **macOS / Windows** — install [Docker Desktop](https://docs.docker.com/desktop/)
-     (or, on macOS, `brew install --cask docker`) and launch it.
+   - **macOS (recommended: OrbStack)**:
+
+     ```bash
+     brew install orbstack
+     open -a OrbStack   # launches OrbStack and sets it as the default docker context
+     ```
+
+     **Cap its memory before starting the devbox** — this is what actually
+     protects the host from a runaway cluster, not just good hygiene. OrbStack
+     → **Settings → Resources → Memory limit**, set a hard ceiling (e.g. half
+     your machine's RAM). Unlike Docker Desktop's soft limit, OrbStack enforces
+     this as a real VM ceiling: the containers inside it can OOM, but macOS
+     itself never will. See [Memory safety](#memory-safety-macos--orbstack)
+     below for a belt-and-suspenders monitor script too.
+
+   - **macOS / Windows (alternative: Docker Desktop)** — install
+     [Docker Desktop](https://docs.docker.com/desktop/) (or, on macOS,
+     `brew install --cask docker`) and launch it. Also set a memory limit
+     under **Settings → Resources**.
    - **Linux** — install [Docker Engine](https://docs.docker.com/engine/install/)
      for your distro. A quick path on Debian/Ubuntu:
 
@@ -147,7 +169,7 @@ cluster). The `flyte` CLI ships with the `flyte` package installed above.
      sudo usermod -aG docker "$USER"   # then log out/in so `docker` runs without sudo
      ```
 
-   Confirm the daemon is up before continuing:
+   Confirm the engine is up before continuing:
 
    ```bash
    docker run --rm hello-world
@@ -202,6 +224,28 @@ cluster). The `flyte` CLI ships with the `flyte` package installed above.
 > The manual integration test can also target the devbox instead of the demo
 > cluster — point `tests/integration/config.yaml` at `endpoint: dns:///localhost:30080`
 > with `builder: local`.
+
+## Memory safety (macOS + OrbStack)
+
+The devbox cluster plus three concurrently scheduled agent pipelines can use a
+lot of RAM. Two layers of defense, in order of importance:
+
+1. **OrbStack's memory limit is the real safety net.** Set it *before* you
+   `flyte start devbox` — Settings → Resources → Memory limit. This is a hard
+   VM ceiling enforced by the hypervisor: if the cluster exceeds it, containers
+   inside OrbStack get OOM-killed, but your Mac's own RAM is never touched. Do
+   this once; it holds for every future devbox run.
+2. **[`scripts/devbox-mem-guard.sh`](scripts/devbox-mem-guard.sh) is an
+   optional second layer** — a host-side monitor (not container-side) that
+   watches overall Mac memory pressure while you work, and runs
+   `flyte stop devbox` if usage crosses a threshold, so you get a clean
+   pause instead of hitting swap. Run it in a separate terminal alongside step
+   2-6 above:
+
+   ```bash
+   ./scripts/devbox-mem-guard.sh                        # default: stop at 85% used, checked every 10s
+   ./scripts/devbox-mem-guard.sh --limit-percent 75 --interval 5
+   ```
 
 ## Stop the agents (deactivate all triggers)
 
