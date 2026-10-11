@@ -114,8 +114,8 @@ async def builder() -> RunRecord:
                 if plan.error:
                     log.warning(
                         "builder: builder did not submit a change for issue #%s (attempt %d): %s. "
-                        "Final message: %s",
-                        number, attempt, plan.error, (result.summary or "")[-800:],
+                        "Agent error: %s. Final message: %s",
+                        number, attempt, plan.error, result.error or "(none)", (result.summary or "")[-800:],
                     )
                 else:
                     log.info("builder: builder proposed no changes for issue #%s: %s", number, plan.summary)
